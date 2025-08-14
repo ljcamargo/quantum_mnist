@@ -83,7 +83,6 @@ def load_mnist_images(split: str = "train", max_images: Optional[int] = None) ->
     """
     return load_mnist_from_huggingface(split, max_images)
 
-
 def apply_center_mask_inplace(fft_data: np.ndarray, mask_factor: float = 0.3) -> np.ndarray:
     """
     Apply masking by zeroing out outer regions while preserving center values.
@@ -113,16 +112,13 @@ def apply_center_mask_inplace(fft_data: np.ndarray, mask_factor: float = 0.3) ->
     
     return masked_fft
 
-
 def apply_fft_2d(image: np.ndarray) -> np.ndarray:
     """Apply 2D FFT to image with shifting."""
     return np.fft.fftshift(np.fft.fft2(image))
 
-
 def apply_inverse_fft_2d(fft_data: np.ndarray) -> np.ndarray:
     """Apply inverse 2D FFT with shifting."""
     return np.real(np.fft.ifft2(np.fft.ifftshift(fft_data)))
-
 
 def extract_non_redundant_fft(fft_data: np.ndarray, mask_factor: float = 0.3) -> Tuple[np.ndarray, float, Tuple[int, int]]:
     """
@@ -157,8 +153,6 @@ def extract_non_redundant_fft(fft_data: np.ndarray, mask_factor: float = 0.3) ->
     
     return normalized, scaling_factor, (h, w)
 
-
-
 def visualize_complex_array(data: np.ndarray, title: str = "") -> plt.Figure:
     """Create visualization of complex array (magnitude and phase)."""
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
@@ -180,21 +174,29 @@ def visualize_complex_array(data: np.ndarray, title: str = "") -> plt.Figure:
     plt.tight_layout()
     return fig
 
-def serialize_complex_array(data: np.ndarray, scaling_factor: float, original_shape: Tuple[int, int], filename: str):
+def serialize_complex_array(
+        data: np.ndarray, 
+        scaling_factor: float, 
+        original_shape: Tuple[int, int], 
+        filename: str,
+        precision: int = 10
+    ):
     """Serializes with shape metadata for reconstruction"""
     serializable = {
         "data": [
             [
-                [round(float(np.real(val)), 1),round(float(np.imag(val)), 1)] for val in row
+                [
+                    round(float(np.real(val)), precision),
+                    round(float(np.imag(val)), precision)
+                ] for val in row
             ] for row in data
         ],
         "shape": original_shape,
-        "scaling": float(scaling_factor),
+        "scale": round(float(scaling_factor), 2),
     }
     
     with open(filename, 'w') as f:
-        json.dump(serializable, f)
-
+        json.dump(serializable, f, separators=(',', ':'), indent=None)
 
 def process_image(image: np.ndarray, output_dir: str, image_idx: int, mask_factor: float = 0.3):
     """Process a single image through the complete pipeline."""
@@ -306,7 +308,7 @@ def process_image(image: np.ndarray, output_dir: str, image_idx: int, mask_facto
 
     # Step 5: Serialize complex array (pass both array and scaling factor)
     print(f"Processing {image_name} - Step 5: Serialization")
-    output_path = os.path.join(output_dir, f"{image_name}_05_complex_array.json")
+    output_path = os.path.join(output_dir, f"{image_name}_05.json")
     serialize_complex_array(non_redundant, scaling_factor, original_shape, output_path)
 
     # Save processing summary
