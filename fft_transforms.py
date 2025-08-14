@@ -124,27 +124,40 @@ def apply_inverse_fft_2d(fft_data: np.ndarray) -> np.ndarray:
     return np.real(np.fft.ifft2(np.fft.ifftshift(fft_data)))
 
 
-def extract_non_redundant_fft(fft_data: np.ndarray) -> np.ndarray:
+def extract_non_redundant_fft(fft_data: np.ndarray, mask_factor: float = 0.3) -> Tuple[np.ndarray, float, Tuple[int, int]]:
     """
-    Extract non-redundant part of FFT data.
-    For real input, FFT has conjugate symmetry, so we only need roughly half.
+    Returns:
+        - Normalized non-redundant FFT coefficients (complex)
+        - Original max magnitude (for reconstruction)
+        - Original dimensions (h, w) for reconstruction
     """
     h, w = fft_data.shape
     
-    # For 2D FFT of real data, we can keep:
-    # - First half of rows completely
-    # - For the remaining rows, keep only half the columns
-    half_h = (h + 1) // 2
-    half_w = (w + 1) // 2
+    # Calculate the kept region dimensions based on mask_factor
+    center_h = int(h * mask_factor)
+    center_w = int(w * mask_factor)
     
-    non_redundant = np.zeros((half_h, w), dtype=complex)
-    non_redundant[:half_h, :] = fft_data[:half_h, :]
+    # Ensure even dimensions for symmetry
+    center_h = center_h - 1 if center_h % 2 == 1 else center_h
+    center_w = center_w - 1 if center_w % 2 == 1 else center_w
     
-    # If we have more than half_h rows, keep only half the columns for the rest
-    if h > half_h:
-        non_redundant = non_redundant[:half_h, :half_w]
+    # Calculate the bottom-right quadrant bounds (non-redundant portion)
+    start_h = h // 2
+    start_w = w // 2
+    end_h = start_h + (center_h // 2)
+    end_w = start_w + (center_w // 2)
     
-    return non_redundant
+    # Extract and crop the non-redundant portion
+    non_redundant = fft_data[start_h:end_h, start_w:end_w].copy()
+    
+    # Normalization
+    max_mag = np.abs(non_redundant).max()
+    scaling_factor = max_mag if max_mag > 0 else 1.0
+    normalized = non_redundant / scaling_factor
+    
+    return normalized, scaling_factor, (h, w)
+
+
 
 def visualize_complex_array(data: np.ndarray, title: str = "") -> plt.Figure:
     """Create visualization of complex array (magnitude and phase)."""
@@ -152,7 +165,7 @@ def visualize_complex_array(data: np.ndarray, title: str = "") -> plt.Figure:
     
     # Magnitude (log scale)
     magnitude = np.abs(data)
-    im_mag = axes[0].imshow(np.log(magnitude + 1e-8), cmap='viridis')
+    im_mag = axes[0].imshow(np.log(magnitude + 1e-8), cmap='gray')
     axes[0].set_title(f'{title} - Log Magnitude')
     plt.colorbar(im_mag, ax=axes[0])
     
@@ -167,29 +180,21 @@ def visualize_complex_array(data: np.ndarray, title: str = "") -> plt.Figure:
     plt.tight_layout()
     return fig
 
-def serialize_complex_array(data: np.ndarray, filename: str):
-    """Serialize complex array to JSON format for easy parsing and human readability."""
-    
-    # Convert complex array to serializable format
-    serializable_data = {
-        "shape": list(data.shape),
-        "dtype": "complex128",
-        "data": []
+def serialize_complex_array(data: np.ndarray, scaling_factor: float, original_shape: Tuple[int, int], filename: str):
+    """Serializes with shape metadata for reconstruction"""
+    serializable = {
+        "data": [
+            [
+                [round(float(np.real(val)), 1),round(float(np.imag(val)), 1)] for val in row
+            ] for row in data
+        ],
+        "shape": original_shape,
+        "scaling": float(scaling_factor),
     }
     
-    # Convert each complex number to [real, imag] pairs
-    for i in range(data.shape[0]):
-        row = []
-        for j in range(data.shape[1]):
-            val = data[i, j]
-            row.append([float(np.real(val)), float(np.imag(val))])
-        serializable_data["data"].append(row)
-    
-    # Save as JSON
     with open(filename, 'w') as f:
-        json.dump(serializable_data, f, indent=2)
-    
-    print(f"Complex array serialized to {filename} (JSON format, {data.size} complex numbers)")
+        json.dump(serializable, f)
+
 
 def process_image(image: np.ndarray, output_dir: str, image_idx: int, mask_factor: float = 0.3):
     """Process a single image through the complete pipeline."""
@@ -197,23 +202,23 @@ def process_image(image: np.ndarray, output_dir: str, image_idx: int, mask_facto
     
     # Step 0: Save original image
     print(f"Processing {image_name} - Step 0: Original Image")
-    fig, ax = plt.subplots(1, 1, figsize=(6, 6))
-    ax.imshow(image, cmap='gray', vmin=0, vmax=1)
-    ax.set_title(f'Original MNIST Image - {image_name}')
-    ax.axis('off')
-    plt.tight_layout()
-    fig.savefig(os.path.join(output_dir, f"{image_name}_00_original_image.png"), 
-                bbox_inches='tight', facecolor='white')
-    plt.close(fig)
+    #fig, ax = plt.subplots(1, 1, figsize=(6, 6))
+    #ax.imshow(image, cmap='gray', vmin=0, vmax=1)
+    #ax.set_title(f'Original MNIST Image - {image_name}')
+    #ax.axis('off')
+    #plt.tight_layout()
+    #fig.savefig(os.path.join(output_dir, f"{image_name}_00_original_image.png"), 
+    #            bbox_inches='tight', facecolor='white')
+    #plt.close(fig)
     
     # Step 1: Apply FFT
     print(f"Processing {image_name} - Step 1: FFT")
     fft_data = apply_fft_2d(image)
     
     # Visualize original FFT
-    fig = visualize_complex_array(fft_data, f"Original FFT - {image_name}")
-    fig.savefig(os.path.join(output_dir, f"{image_name}_01_original_fft.png"))
-    plt.close(fig)
+    #fig = visualize_complex_array(fft_data, f"Original FFT - {image_name}")
+    #fig.savefig(os.path.join(output_dir, f"{image_name}_01_original_fft.png"))
+    #plt.close(fig)
     
     # Step 2: Apply mask to FFT (direct region copying, not multiplication)
     print(f"Processing {image_name} - Step 2: Masking")
@@ -235,12 +240,11 @@ def process_image(image: np.ndarray, output_dir: str, image_idx: int, mask_facto
     ax.imshow(mask_vis, cmap='gray', vmin=0, vmax=1)
     ax.set_title(f'FFT Mask (factor={mask_factor}) - {image_name}')
     ax.axis('off')
-    plt.tight_layout()
-    fig.savefig(os.path.join(output_dir, f"{image_name}_02a_mask.png"), 
-                bbox_inches='tight', facecolor='white')
-    plt.close(fig)
+    #plt.tight_layout()
+    #fig.savefig(os.path.join(output_dir, f"{image_name}_02a_mask.png"), 
+    #            bbox_inches='tight', facecolor='white')
+    #plt.close(fig)
     
-    # In process_image(), modify the verification section:
     # Verify masking worked correctly
     print(f"Original FFT non-zero count: {np.count_nonzero(fft_data)}")
     print(f"Masked FFT non-zero count: {np.count_nonzero(masked_fft)} (should be ~{center_h*center_w})")
@@ -258,9 +262,9 @@ def process_image(image: np.ndarray, output_dir: str, image_idx: int, mask_facto
     print(f"Max non-center value: {np.abs(non_center_values).max():.2e} (should be 0.0)")
     
     # Visualize masked FFT
-    fig = visualize_complex_array(masked_fft, f"Masked FFT - {image_name}")
-    fig.savefig(os.path.join(output_dir, f"{image_name}_02b_masked_fft.png"))
-    plt.close(fig)
+    #fig = visualize_complex_array(masked_fft, f"Masked FFT - {image_name}")
+    #fig.savefig(os.path.join(output_dir, f"{image_name}_02b_masked_fft.png"))
+    #plt.close(fig)
     
     # Step 3: Apply inverse FFT to see masking effect
     print(f"Processing {image_name} - Step 3: Inverse FFT")
@@ -293,30 +297,31 @@ def process_image(image: np.ndarray, output_dir: str, image_idx: int, mask_facto
     
     # Step 4: Extract non-redundant FFT data
     print(f"Processing {image_name} - Step 4: Non-redundant extraction")
-    non_redundant = extract_non_redundant_fft(masked_fft)
-    
-    # Visualize non-redundant data
+    non_redundant, scaling_factor, original_shape = extract_non_redundant_fft(masked_fft, mask_factor)
+
+    # Visualize non-redundant data (pass just the array, not the tuple)
     fig = visualize_complex_array(non_redundant, f"Non-redundant FFT - {image_name}")
     fig.savefig(os.path.join(output_dir, f"{image_name}_04_non_redundant_fft.png"))
     plt.close(fig)
-    
-    # Step 5: Serialize complex array
+
+    # Step 5: Serialize complex array (pass both array and scaling factor)
     print(f"Processing {image_name} - Step 5: Serialization")
-    serialize_complex_array(non_redundant, os.path.join(output_dir, f"{image_name}_05_complex_array.json"))
-    
+    output_path = os.path.join(output_dir, f"{image_name}_05_complex_array.json")
+    serialize_complex_array(non_redundant, scaling_factor, original_shape, output_path)
+
     # Save processing summary
-    summary = {
-        "image_index": image_idx,
-        "original_shape": image.shape,
-        "fft_shape": fft_data.shape,
-        "non_redundant_shape": non_redundant.shape,
-        "mask_factor": mask_factor,
-        "compression_ratio": (np.prod(fft_data.shape) / np.prod(non_redundant.shape)),
-        "reconstruction_mse": float(np.mean((image - reconstructed) ** 2))
-    }
+    # summary = {
+    #     "image_index": image_idx,
+    #     "original_shape": image.shape,
+    #     "fft_shape": fft_data.shape,
+    #     "non_redundant_shape": non_redundant.shape,
+    #     "mask_factor": mask_factor,
+    #     "compression_ratio": (np.prod(fft_data.shape) / np.prod(non_redundant.shape)),
+    #     "reconstruction_mse": float(np.mean((image - reconstructed) ** 2))
+    # }
     
-    with open(os.path.join(output_dir, f"{image_name}_summary.json"), 'w') as f:
-        json.dump(summary, f, indent=2)
+    # with open(os.path.join(output_dir, f"{image_name}_summary.json"), 'w') as f:
+    #     json.dump(summary, f, indent=2)
 
 def main():
     parser = argparse.ArgumentParser(description="FFT Image Processing for MNIST")
