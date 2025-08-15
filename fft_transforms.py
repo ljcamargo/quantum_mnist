@@ -10,6 +10,7 @@ This script loads MNIST data from Hugging Face and performs FFT analysis with:
 4. Apply inverse FFT to see masking effects
 5. Extract non-redundant FFT data (remove symmetric components)
 6. Save visualizations and serialized complex arrays
+7. Reconstruct from JSON data and compare
 
 Requirements: pip install datasets pillow matplotlib numpy
 """
@@ -179,6 +180,7 @@ def serialize_complex_array(
         scaling_factor: float, 
         original_shape: Tuple[int, int], 
         filename: str,
+        mask_factor: float,  # Added mask_factor parameter
         precision: int = 10
     ):
     """Serializes with shape metadata for reconstruction"""
@@ -193,10 +195,71 @@ def serialize_complex_array(
         ],
         "shape": original_shape,
         "scale": round(float(scaling_factor), 2),
+        "mask_factor": mask_factor  # Added mask_factor to JSON
     }
     
     with open(filename, 'w') as f:
         json.dump(serializable, f, separators=(',', ':'), indent=None)
+
+def load_complex_array_from_json(filename: str) -> Tuple[np.ndarray, float, Tuple[int, int], float]:
+    """Load complex array from JSON file."""
+    with open(filename, 'r') as f:
+        data = json.load(f)
+    
+    # Reconstruct complex array
+    complex_array = np.array([
+        [complex(real, imag) for real, imag in row]
+        for row in data["data"]
+    ])
+    
+    return complex_array, data["scale"], tuple(data["shape"]), data["mask_factor"]
+
+def reconstruct_fft_from_non_redundant(
+    normalized_coeffs: np.ndarray, 
+    scaling_factor: float, 
+    original_shape: Tuple[int, int],
+    mask_factor: float = 0.3
+) -> np.ndarray:
+    """
+    Reconstructs the original FFT data from normalized non-redundant coefficients.
+    Simply puts the data back where it was extracted from.
+    
+    Args:
+        normalized_coeffs: Normalized non-redundant FFT coefficients (complex)
+        scaling_factor: Original max magnitude used for normalization
+        original_shape: Original dimensions (h, w) from JSON metadata
+        mask_factor: Same mask factor used in extraction (default 0.3)
+    
+    Returns:
+        Reconstructed FFT data with original dimensions
+    """
+    # Use the original dimensions from JSON metadata
+    h, w = original_shape
+    
+    # Denormalize the coefficients
+    denormalized = normalized_coeffs * scaling_factor
+    
+    # Calculate the kept region dimensions (same as masking logic)
+    center_h = int(h * mask_factor)
+    center_w = int(w * mask_factor)
+    
+    # Ensure even dimensions for symmetry (same logic as original)
+    center_h = center_h - 1 if center_h % 2 == 1 else center_h
+    center_w = center_w - 1 if center_w % 2 == 1 else center_w
+    
+    # Initialize the reconstructed FFT with zeros
+    reconstructed_fft = np.zeros((h, w), dtype=complex)
+    
+    # The extract_non_redundant_fft function extracted from these exact coordinates:
+    start_h = h // 2
+    start_w = w // 2
+    end_h = start_h + (center_h // 2)
+    end_w = start_w + (center_w // 2)
+    
+    # Put the data back in the exact same location it was extracted from
+    reconstructed_fft[start_h:end_h, start_w:end_w] = denormalized
+    
+    return reconstructed_fft
 
 def process_image(image: np.ndarray, output_dir: str, image_idx: int, mask_factor: float = 0.3):
     """Process a single image through the complete pipeline."""
@@ -204,27 +267,24 @@ def process_image(image: np.ndarray, output_dir: str, image_idx: int, mask_facto
     
     # Step 0: Save original image
     print(f"Processing {image_name} - Step 0: Original Image")
-    #fig, ax = plt.subplots(1, 1, figsize=(6, 6))
-    #ax.imshow(image, cmap='gray', vmin=0, vmax=1)
-    #ax.set_title(f'Original MNIST Image - {image_name}')
-    #ax.axis('off')
-    #plt.tight_layout()
-    #fig.savefig(os.path.join(output_dir, f"{image_name}_00_original_image.png"), 
-    #            bbox_inches='tight', facecolor='white')
-    #plt.close(fig)
     
     # Step 1: Apply FFT
     print(f"Processing {image_name} - Step 1: FFT")
     fft_data = apply_fft_2d(image)
     
     # Visualize original FFT
-    #fig = visualize_complex_array(fft_data, f"Original FFT - {image_name}")
-    #fig.savefig(os.path.join(output_dir, f"{image_name}_01_original_fft.png"))
-    #plt.close(fig)
+    fig = visualize_complex_array(fft_data, f"Original FFT - {image_name}")
+    fig.savefig(os.path.join(output_dir, f"{image_name}_01_original_fft.png"))
+    plt.close(fig)
     
     # Step 2: Apply mask to FFT (direct region copying, not multiplication)
     print(f"Processing {image_name} - Step 2: Masking")
     masked_fft = apply_center_mask_inplace(fft_data, mask_factor)
+
+    # Visualize masked FFT
+    fig = visualize_complex_array(fft_data, f"Original FFT - {image_name}")
+    fig.savefig(os.path.join(output_dir, f"{image_name}_02_masked_fft.png"))
+    plt.close(fig)
     
     # Create mask visualization for reference
     h, w = fft_data.shape
@@ -262,11 +322,6 @@ def process_image(image: np.ndarray, output_dir: str, image_idx: int, mask_facto
     non_center_mask[start_h:start_h + center_h, start_w:start_w + center_w] = False
     non_center_values = masked_fft[non_center_mask]
     print(f"Max non-center value: {np.abs(non_center_values).max():.2e} (should be 0.0)")
-    
-    # Visualize masked FFT
-    #fig = visualize_complex_array(masked_fft, f"Masked FFT - {image_name}")
-    #fig.savefig(os.path.join(output_dir, f"{image_name}_02b_masked_fft.png"))
-    #plt.close(fig)
     
     # Step 3: Apply inverse FFT to see masking effect
     print(f"Processing {image_name} - Step 3: Inverse FFT")
@@ -309,21 +364,128 @@ def process_image(image: np.ndarray, output_dir: str, image_idx: int, mask_facto
     # Step 5: Serialize complex array (pass both array and scaling factor)
     print(f"Processing {image_name} - Step 5: Serialization")
     output_path = os.path.join(output_dir, f"{image_name}_05.json")
-    serialize_complex_array(non_redundant, scaling_factor, original_shape, output_path)
+    serialize_complex_array(non_redundant, scaling_factor, original_shape, output_path, mask_factor)
 
-    # Save processing summary
-    # summary = {
-    #     "image_index": image_idx,
-    #     "original_shape": image.shape,
-    #     "fft_shape": fft_data.shape,
-    #     "non_redundant_shape": non_redundant.shape,
-    #     "mask_factor": mask_factor,
-    #     "compression_ratio": (np.prod(fft_data.shape) / np.prod(non_redundant.shape)),
-    #     "reconstruction_mse": float(np.mean((image - reconstructed) ** 2))
-    # }
+    # Step 6: Load from JSON and reconstruct
+    print(f"Processing {image_name} - Step 6: JSON Reconstruction Test")
+    loaded_coeffs, loaded_scale, loaded_shape, loaded_mask_factor = load_complex_array_from_json(output_path)
     
-    # with open(os.path.join(output_dir, f"{image_name}_summary.json"), 'w') as f:
-    #     json.dump(summary, f, indent=2)
+    # Verify loaded data matches original
+    print(f"Data integrity check:")
+    print(f"  Coefficients match: {np.allclose(loaded_coeffs, non_redundant)}")
+    print(f"  Scale match: {loaded_scale == scaling_factor}")
+    print(f"  Shape match: {loaded_shape == original_shape}")
+    print(f"  Mask factor match: {loaded_mask_factor == mask_factor}")
+    
+    # Reconstruct FFT from loaded JSON data
+    reconstructed_fft_from_json = reconstruct_fft_from_non_redundant(
+        loaded_coeffs, loaded_scale, loaded_shape, loaded_mask_factor
+    )
+    
+    # Compare reconstructed FFT with original masked FFT
+    fft_diff = np.abs(reconstructed_fft_from_json - masked_fft).max()
+    print(f"  Max FFT reconstruction error: {fft_diff:.2e}")
+    
+    # Apply inverse FFT to get final reconstructed image
+    final_reconstructed = apply_inverse_fft_2d(reconstructed_fft_from_json)
+    final_reconstructed = np.real(final_reconstructed)  # Ensure real values only
+    final_reconstructed = np.clip(final_reconstructed, 0, 1)  # Ensure valid range
+    
+    # Check if reconstructed image has any complex components (shouldn't happen)
+    if np.iscomplexobj(final_reconstructed):
+        print(f"  Warning: Reconstructed image has complex components!")
+        max_imag = np.abs(np.imag(final_reconstructed)).max()
+        print(f"  Max imaginary component: {max_imag:.2e}")
+        final_reconstructed = np.real(final_reconstructed)
+    
+    # Compare final images
+    image_diff = np.abs(final_reconstructed - reconstructed).max()
+    print(f"  Max image reconstruction error: {image_diff:.2e}")
+    
+    # Step 7: Visualize reconstruction comparison
+    print(f"Processing {image_name} - Step 7: Full Pipeline Comparison")
+    fig, axes = plt.subplots(2, 4, figsize=(15, 10))
+    
+    # Top row: Original pipeline
+    axes[0, 0].imshow(image, cmap='gray', vmin=0, vmax=1)
+    axes[0, 0].set_title('Original Image')
+    axes[0, 0].axis('off')
+    
+    axes[0, 1].imshow(reconstructed, cmap='gray', vmin=0, vmax=1)
+    axes[0, 1].set_title('Direct Reconstruction\n(FFT → Mask → iFFT)')
+    axes[0, 1].axis('off')
+
+    magnitude = np.abs(masked_fft)
+    axes[0, 2].imshow(np.log(magnitude + 1e-8), cmap='gray',)
+    axes[0, 2].set_title('Masked FFT Magnitude')
+    axes[0, 2].axis('off')
+
+    phase = np.angle(masked_fft)
+    phase_normalized = (phase + np.pi) / (2 * np.pi)
+    axes[0, 3].imshow(phase_normalized, cmap='gray',)
+    axes[0, 3].set_title('Masked FFT Phase')
+    axes[0, 3].axis('off')
+
+    print(f"Masked FFT {masked_fft}")
+    
+    # Bottom row: JSON pipeline
+    axes[1, 0].imshow(image, cmap='gray', vmin=0, vmax=1)
+    axes[1, 0].set_title('Original Image')
+    axes[1, 0].axis('off')
+    
+    axes[1, 1].imshow(final_reconstructed, cmap='gray', vmin=0, vmax=1)
+    axes[1, 1].set_title('JSON Reconstruction\n(JSON → FFT → iFFT)')
+    axes[1, 1].axis('off')
+
+    magnitude = np.abs(reconstructed_fft_from_json)
+    axes[0, 2].imshow(np.log(magnitude + 1e-8), cmap='gray',)
+    axes[0, 2].set_title('JSON FFT Magnitude')
+    axes[0, 2].axis('off')
+
+    phase = np.angle(reconstructed_fft_from_json)
+    phase_normalized = (phase + np.pi) / (2 * np.pi)
+    axes[0, 3].imshow(phase_normalized, cmap='gray',)
+    axes[0, 3].set_title('JSON FFT Phase')
+    axes[0, 3].axis('off')
+
+    print(f"Reconstructed FFT {reconstructed_fft_from_json}")
+    
+    plt.tight_layout()
+    fig.savefig(os.path.join(output_dir, f"{image_name}_06_full_pipeline_comparison.png"),
+                bbox_inches='tight', facecolor='white')
+    plt.close(fig)
+    
+    # Step 8: Compression ratio and statistics
+    print(f"Processing {image_name} - Step 8: Statistics")
+    original_size = image.size * 8  # float64 bytes
+    json_size = os.path.getsize(output_path)  # JSON file size
+    non_redundant_size = non_redundant.size * 16  # complex128 bytes
+    
+    compression_ratio = original_size / non_redundant_size
+    
+    stats = {
+        "original_image_shape": image.shape,
+        "original_fft_shape": fft_data.shape,
+        "non_redundant_shape": non_redundant.shape,
+        "mask_factor": mask_factor,
+        "scaling_factor": float(scaling_factor),
+        "compression_ratio": float(compression_ratio),
+        "original_size_bytes": int(original_size),
+        "non_redundant_size_bytes": int(non_redundant_size),
+        "json_file_size_bytes": int(json_size),
+        "max_fft_reconstruction_error": float(fft_diff),
+        "max_image_reconstruction_error": float(image_diff),
+        "mean_squared_error": float(np.mean((image - final_reconstructed)**2)),
+        "peak_signal_noise_ratio": float(20 * np.log10(1.0 / np.sqrt(np.mean((image - final_reconstructed)**2))))
+    }
+    
+    stats_path = os.path.join(output_dir, f"{image_name}_07_stats.json")
+    with open(stats_path, 'w') as f:
+        json.dump(stats, f, indent=2)
+    
+    print(f"  Compression ratio: {compression_ratio:.2f}x")
+    print(f"  PSNR: {stats['peak_signal_noise_ratio']:.2f} dB")
+    print(f"  JSON file size: {json_size} bytes")
 
 def main():
     parser = argparse.ArgumentParser(description="FFT Image Processing for MNIST")
@@ -388,16 +550,16 @@ def main():
     print(f"\nProcessing complete! Results saved to {args.output_dir}")
     print(f"Dataset used: MNIST {args.split} split from Hugging Face")
     print("\nGenerated files per image:")
-    print("  *_00_original_image.png - Original MNIST image")
-    print("  *_01_original_fft.png - Original FFT visualization")
-    print("  *_02a_mask.png - FFT mask visualization")
-    print("  *_02b_masked_fft.png - Masked FFT visualization") 
-    print("  *_03_reconstruction_comparison.png - Original vs reconstructed image")
-    print("  *_04_non_redundant_fft.png - Non-redundant FFT data")
-    print("  *_05_complex_array.json - JSON serialized complex array (human-readable)")
-    print("  *_summary.json - Processing summary and metrics")
-    print("\nThe JSON format allows easy parsing and reconstruction:")
+    print("  *_03_reconstruction_comparison.png - Original vs direct reconstructed image")
+    print("  *_04_non_redundant_fft.png - Non-redundant FFT data visualization")
+    print("  *_05.json - JSON serialized complex array with metadata")
+    print("  *_06_full_pipeline_comparison.png - Direct vs JSON reconstruction comparison")
+    print("  *_07_stats.json - Processing statistics and metrics")
+    print("\nThe JSON format includes all reconstruction metadata:")
     print("  data[i][j] = [real_part, imaginary_part]")
+    print("  scale = normalization factor")
+    print("  shape = original FFT dimensions")  
+    print("  mask_factor = compression parameter")
     print("\nRequirements:")
     print("  pip install datasets pillow matplotlib numpy")
 
