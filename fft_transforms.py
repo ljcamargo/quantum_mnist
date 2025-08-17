@@ -31,8 +31,6 @@ def load_mnist(split="train", max_images=None):
     ]
     return data
 
-import math
-
 def in_circle(x: int, y: int, shape: tuple[int, int]) -> bool:
     """
     Check if a pixel (x,y) lies inside or on the rim of a circle
@@ -165,9 +163,11 @@ def replace_nan_pixels(arr: np.ndarray, fill_value: complex = 0+0j) -> np.ndarra
     out[mask] = fill_value
     return out
 
-def serialize_complex(data, label, scale, orig_shape, trunc_factor, filename, precision):
+def serialize_complex(data, id, label, scale, orig_shape, trunc_factor, filename, precision, jsonl):
     """Serialize complex array to JSON"""
     serialized = {
+        "id": id,
+        "label": label,
         "data": [
             [
                 [
@@ -184,13 +184,17 @@ def serialize_complex(data, label, scale, orig_shape, trunc_factor, filename, pr
                 ] for val in row
             ] for row in data
         ],
-        "label": label,
         "scale": float(scale),
         "original_shape": orig_shape,
         "truncate_factor": trunc_factor
     }
-    with open(filename, 'w') as f:
-        json.dump(serialized, f, separators=(',', ':'))
+    if jsonl:
+        with open(filename, 'a') as f:
+            json.dump(serialized, f, separators=(',', ':'))
+            f.write('\n')
+    else:
+        with open(filename, 'w') as f:
+            json.dump(serialized, f, separators=(',', ':'))
 
 def load_complex(filename):
     """Load complex array from JSON"""
@@ -206,20 +210,21 @@ def load_complex(filename):
     ])
     return complex_array, data["scale"], data["original_shape"], data["truncate_factor"]
 
-def process_image(item, output_dir, idx, truncate_factor, precision):
+def process_image(item, output_dir, idx, truncate_factor, precision, create_plots, jsonl):
     [image, label] = item
-    name = f"image_{idx:04d}_label_{label}"
+    id = f"image_{idx:04d}"
+    name = f"{id}_{label}"
     
     # Forward transform
     fft_data = np.fft.fftshift(np.fft.fftn(image, norm='forward'))
-    rfft_data = np.fft.rfftn(image)
     
     # Truncate
     truncated = truncate_fft(fft_data, truncate_factor)
 
     # Verify untruncation
-    untruncated = untruncate_fft(truncated, fft_data.shape)
-    pre_reconstructured = np.fft.ifftn(np.fft.ifftshift(untruncated), norm='forward')
+    if create_plots:
+        untruncated = untruncate_fft(truncated, fft_data.shape)
+        pre_reconstructured = np.fft.ifftn(np.fft.ifftshift(untruncated), norm='forward')
     
     # Experimental Circular Mask
     truncated = erase_outer_circle(truncated)
@@ -228,23 +233,27 @@ def process_image(item, output_dir, idx, truncate_factor, precision):
     serializable, scale = normalize(non_redundant)
     
     # Serialize
-    json_path = os.path.join(output_dir, f"{name}.json")
-    serialize_complex(serializable, label, scale, fft_data.shape, truncate_factor, json_path, precision)
+    if jsonl:
+        json_path = os.path.join(output_dir, f"dataset.jsonl")
+    else:
+        json_path = os.path.join(output_dir, f"{name}.json")
+    serialize_complex(serializable, id, label, scale, fft_data.shape, truncate_factor, json_path, precision, jsonl)
+    
+    if not create_plots:
+        return
     
     # Load and Reconstruct
     loaded_norm, loaded_scale, loaded_shape, _ = load_complex(json_path)
 
     # Restore NaNs into defaults:
     loaded_norm = replace_nan_pixels(loaded_norm, fill_value = 0.0+0.0j)
-
     loaded_norm = loaded_norm * loaded_scale
     restored_hermitian = restore_hermitian(loaded_norm, truncated.shape)
     restored_untruncated = untruncate_fft(restored_hermitian, loaded_shape)
     restored_unfft = np.fft.ifftn(np.fft.ifftshift(restored_untruncated), norm='forward')
     
+    # Plotting 
     fig, axes = plt.subplots(3, 4, figsize=(16, 8))
-    
-    # Original image and its transform
     axes[0, 0].imshow(image, cmap='gray')
     axes[0, 0].set_title('Original Image')
     axes[0, 0].axis('off')
@@ -309,6 +318,8 @@ def main():
     parser.add_argument("--precision", type=int, help="Precision for serializing floats")
     parser.add_argument("--max-images", type=int, default=10, help="Max images when using 'all'")
     parser.add_argument("--split", choices=["train", "test"], default="train", help="Dataset split")
+    parser.add_argument("--create-plots", action="store_true", help="Create example images")
+    parser.add_argument("--jsonl", action="store_true", help="Stores JSONL instead of JSON")
     
     args = parser.parse_args()
     
@@ -329,14 +340,14 @@ def main():
     if args.input_path.lower() == "all":
         num_process = min(args.max_images, len(images))
         for i in range(num_process):
-            process_image(images[i], args.output_dir, i, args.truncate_factor, args.precision)
+            process_image(images[i], args.output_dir, i, args.truncate_factor, args.precision, args.create_plots, args.jsonl)
     else:
         try:
             idx = int(args.input_path)
             if idx >= len(images):
                 print(f"Index {idx} out of range")
                 return
-            process_image(images[idx], args.output_dir, idx, args.truncate_factor, args.precision)
+            process_image(images[idx], args.output_dir, idx, args.truncate_factor, args.precision, args.create_plots, args.jsonl)
         except ValueError:
             print("Invalid input path")
             return
