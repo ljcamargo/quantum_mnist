@@ -17,19 +17,11 @@ try:
 except ImportError:
     DATASETS_AVAILABLE = False
 
-def load_mnist(split="train", max_images=None):
+def load_mnist(split="train"):
     if not DATASETS_AVAILABLE:
         raise ImportError("pip install datasets pillow")
     
-    dataset = load_dataset("ylecun/mnist", split=split)
-    if max_images:
-        dataset = dataset.select(range(min(max_images, len(dataset))))
-
-    data = [
-        [np.array(item['image'], dtype=np.float32) / 255.0, item['label']]
-        for item in dataset
-    ]
-    return data
+    return load_dataset("ylecun/mnist", split=split)
 
 def in_circle(x: int, y: int, shape: tuple[int, int]) -> bool:
     """
@@ -210,8 +202,7 @@ def load_complex(filename):
     ])
     return complex_array, data["scale"], data["original_shape"], data["truncate_factor"]
 
-def process_image(item, output_dir, idx, truncate_factor, precision, create_plots, jsonl):
-    [image, label] = item
+def process_image(image, label, output_dir, idx, truncate_factor, precision, create_plots, jsonl):
     id = f"image_{idx:04d}"
     name = f"{id}_{label}"
     
@@ -312,15 +303,14 @@ def process_image(item, output_dir, idx, truncate_factor, precision, create_plot
 
 def main():
     parser = argparse.ArgumentParser(description="FFT Image Processing with rfftn/irfftn")
-    parser.add_argument("input_path", help="Image index or 'all'")
+    parser.add_argument("image_selector", help="Image index or 'all'")
     parser.add_argument("output_dir", help="Output directory")
     parser.add_argument("--truncate-factor", type=float, default=0.3, help="Fraction to keep (0-1)")
     parser.add_argument("--precision", type=int, help="Precision for serializing floats")
-    parser.add_argument("--max-images", type=int, default=10, help="Max images when using 'all'")
+    parser.add_argument("--max-images", type=int, help="Max images when using 'all'")
     parser.add_argument("--split", choices=["train", "test"], default="train", help="Dataset split")
     parser.add_argument("--create-plots", action="store_true", help="Create example images")
     parser.add_argument("--jsonl", action="store_true", help="Stores JSONL instead of JSON")
-    
     args = parser.parse_args()
     
     if not DATASETS_AVAILABLE:
@@ -330,27 +320,33 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     
     try:
-        max_load = 1000 if args.input_path.lower() == "all" else 100
-        images = load_mnist(args.split, max_load)
-        print(f"Loaded {len(images)} images")
-    except Exception as e:
-        print(f"Error loading MNIST: {e}")
-        return
-    
-    if args.input_path.lower() == "all":
-        num_process = min(args.max_images, len(images))
-        for i in range(num_process):
-            process_image(images[i], args.output_dir, i, args.truncate_factor, args.precision, args.create_plots, args.jsonl)
-    else:
-        try:
-            idx = int(args.input_path)
-            if idx >= len(images):
-                print(f"Index {idx} out of range")
+        dataset = load_mnist(args.split)
+        length = len(dataset)
+        if args.image_selector == "all":
+            max_process = min(args.max_images or length, length)
+            indices = range(max_process)
+        else:
+            idx = int(args.image_selector)
+            if idx >= length:
+                print(f"Index {idx} out of range (max: {length - 1})")
                 return
-            process_image(images[idx], args.output_dir, idx, args.truncate_factor, args.precision, args.create_plots, args.jsonl)
-        except ValueError:
-            print("Invalid input path")
-            return
+            indices = [idx]
+        
+        print(f"Processing {len(indices)} images from dataset of {length}")
+        
+        for index in indices:
+            item = dataset[index]
+            image_array = np.array(item['image'], dtype=np.float32) / 255.0
+            print(f"Processing index {index}")
+            process_image(
+                image_array, item['label'], 
+                args.output_dir, index, args.truncate_factor, 
+                args.precision, args.create_plots, args.jsonl
+            )
+        
+    except ValueError:
+        print("Invalid image selector: must be 'all' or a valid integer index")
+        return
     
     print(f"Results in {args.output_dir}")
 
