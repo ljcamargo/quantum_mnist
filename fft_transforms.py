@@ -165,16 +165,22 @@ def replace_nan_pixels(arr: np.ndarray, fill_value: complex = 0+0j) -> np.ndarra
     out[mask] = fill_value
     return out
 
-def serialize_complex(data, label, scale, orig_shape, trunc_factor, filename, precision= 10):
+def serialize_complex(data, label, scale, orig_shape, trunc_factor, filename, precision):
     """Serialize complex array to JSON"""
     serialized = {
         "data": [
             [
                 [
-                    None if (math.isnan(val.real) or math.isnan(val.imag))
-                        else round(float(val.real), precision),
-                    None if (math.isnan(val.real) or math.isnan(val.imag))
-                        else round(float(val.imag), precision)
+                    None if (
+                        math.isnan(val.real) or math.isnan(val.imag)
+                    ) else (
+                        round(float(val.real), precision) if precision else float(val.real)
+                    ),
+                    None if (
+                        math.isnan(val.real) or math.isnan(val.imag)
+                    ) else (
+                        round(float(val.imag), precision) if precision else float(val.imag)
+                    ),
                 ] for val in row
             ] for row in data
         ],
@@ -200,7 +206,7 @@ def load_complex(filename):
     ])
     return complex_array, data["scale"], data["original_shape"], data["truncate_factor"]
 
-def process_image(item, output_dir, idx, truncate_factor=0.3):
+def process_image(item, output_dir, idx, truncate_factor, precision):
     [image, label] = item
     name = f"image_{idx:04d}_label_{label}"
     
@@ -223,7 +229,7 @@ def process_image(item, output_dir, idx, truncate_factor=0.3):
     
     # Serialize
     json_path = os.path.join(output_dir, f"{name}.json")
-    serialize_complex(serializable, label, scale, fft_data.shape, truncate_factor, json_path, precision=3)
+    serialize_complex(serializable, label, scale, fft_data.shape, truncate_factor, json_path, precision)
     
     # Load and Reconstruct
     loaded_norm, loaded_scale, loaded_shape, _ = load_complex(json_path)
@@ -291,8 +297,6 @@ def process_image(item, output_dir, idx, truncate_factor=0.3):
     axes[2, 3].imshow(np.imag(restored_untruncated), cmap='RdBu')
     axes[2, 3].set_title('Json RFFT Imag')
 
-
-
     plt.tight_layout()
     fig.savefig(os.path.join(output_dir, f"{name}_analysis.png"), dpi=150, bbox_inches='tight')
     plt.close(fig)
@@ -302,6 +306,7 @@ def main():
     parser.add_argument("input_path", help="Image index or 'all'")
     parser.add_argument("output_dir", help="Output directory")
     parser.add_argument("--truncate-factor", type=float, default=0.3, help="Fraction to keep (0-1)")
+    parser.add_argument("--precision", type=int, help="Precision for serializing floats")
     parser.add_argument("--max-images", type=int, default=10, help="Max images when using 'all'")
     parser.add_argument("--split", choices=["train", "test"], default="train", help="Dataset split")
     
@@ -324,14 +329,14 @@ def main():
     if args.input_path.lower() == "all":
         num_process = min(args.max_images, len(images))
         for i in range(num_process):
-            process_image(images[i], args.output_dir, i, args.truncate_factor)
+            process_image(images[i], args.output_dir, i, args.truncate_factor, args.precision)
     else:
         try:
             idx = int(args.input_path)
             if idx >= len(images):
                 print(f"Index {idx} out of range")
                 return
-            process_image(images[idx], args.output_dir, idx, args.truncate_factor)
+            process_image(images[idx], args.output_dir, idx, args.truncate_factor, args.precision)
         except ValueError:
             print("Invalid input path")
             return
