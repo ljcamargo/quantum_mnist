@@ -5,7 +5,6 @@ Usage: python fft_transforms.py <input_path> <output_dir> [--truncate-factor 0.3
 """
 
 import os
-import sys
 import math
 import argparse
 import numpy as np
@@ -25,14 +24,67 @@ def load_mnist(split="train", max_images=None):
     dataset = load_dataset("ylecun/mnist", split=split)
     if max_images:
         dataset = dataset.select(range(min(max_images, len(dataset))))
-    
-    return np.array([np.array(item['image'], dtype=np.float32) / 255.0 
-                     for item in dataset])
+
+    data = [
+        [np.array(item['image'], dtype=np.float32) / 255.0, item['label']]
+        for item in dataset
+    ]
+    return data
+
+import math
+
+def in_circle(x: int, y: int, shape: tuple[int, int]) -> bool:
+    """
+    Check if a pixel (x,y) lies inside or on the rim of a circle
+    whose diameter equals the side length of the square array.
+
+    Args:
+        x, y : int
+            Pixel coordinates (0-indexed).
+        shape : tuple[int,int]
+            Shape of the array (must be square, e.g. (n,n)).
+
+    Returns:
+        bool : True if inside or on rim, False otherwise.
+    """
+    n, m = shape
+    assert n == m, "Shape must be square"
+
+    # circle center (middle of grid)
+    cx, cy = (n - 1) / 2, (m - 1) / 2
+    r = n / 2  # radius = half of side length
+
+    # squared distance from center
+    d2 = (x - cx)**2 + (y - cy)**2
+
+    return d2 <= r**2 + 1e-9  # include rim
+
+def circular_mask(shape: tuple[int, int]) -> np.ndarray:
+    """
+    Create a boolean mask for pixels inside or on the rim of a circle
+    inscribed in a square array of given shape.
+    """
+    n, m = shape
+    assert n == m, "Shape must be square"
+
+    # grid of coordinates
+    y, x = np.ogrid[:n, :m]  # y = rows, x = cols
+    cx, cy = (n - 1) / 2, (m - 1) / 2
+    r = n / 2
+
+    # squared distance
+    d2 = (x - cx)**2 + (y - cy)**2
+    return d2 <= r**2
+
+def erase_outer_circle(fft_data):
+    mask = circular_mask(fft_data.shape)
+    masked = fft_data.copy()
+    masked[~mask] = None
+    return masked
 
 def truncate_fft(fft_data, factor=0.3):
     h, w = fft_data.shape
     copied_fft = fft_data.copy()
-    
     center_h = math.ceil(h * factor)
     center_w = math.ceil(w * factor)
     
@@ -83,25 +135,50 @@ def restore_hermitian(truncated, original_shape):
     
     return restored
 
-def pad_rfft(truncated, original_shape, fill_value=0):
-    """Pad truncated rfft back to original shape"""
-    h, w = original_shape
-    padded = np.full((h, w), fill_value, dtype=truncated.dtype)
-    th, tw = truncated.shape
-    padded[:th, :tw] = truncated
-    return padded
+def normalize(array):
+    valid_mask = ~np.isnan(array)  # True where data is valid
+    if np.any(valid_mask):
+        max_mag = np.abs(array[valid_mask]).max()
+    else:
+        max_mag = 1.0
+    scale = max_mag if max_mag > 0 else 1.0
+    normalized = array.copy()
+    normalized[valid_mask] = array[valid_mask] / scale
+    normalized[~valid_mask] = np.nan + 1j*np.nan
+    return normalized, scale
 
-def serialize_complex(data, scale, orig_shape, trunc_factor, filename, precision= 10):
+def replace_nan_pixels(arr: np.ndarray, fill_value: complex = 0+0j) -> np.ndarray:
+    """
+    Replace NaN+NaN pixels in a complex array with a specified fill value.
+    
+    Args:
+        arr : np.ndarray
+            Complex array with NaNs for excluded pixels.
+        fill_value : complex
+            Value to replace NaN pixels with.
+    
+    Returns:
+        np.ndarray : new array with NaNs replaced.
+    """
+    out = arr.copy()
+    mask = np.isnan(arr.real) & np.isnan(arr.imag)
+    out[mask] = fill_value
+    return out
+
+def serialize_complex(data, label, scale, orig_shape, trunc_factor, filename, precision= 10):
     """Serialize complex array to JSON"""
     serialized = {
         "data": [
             [
                 [
-                    round(float(np.real(val)), precision),
-                    round(float(np.imag(val)), precision),
+                    None if (math.isnan(val.real) or math.isnan(val.imag))
+                        else round(float(val.real), precision),
+                    None if (math.isnan(val.real) or math.isnan(val.imag))
+                        else round(float(val.imag), precision)
                 ] for val in row
             ] for row in data
         ],
+        "label": label,
         "scale": float(scale),
         "original_shape": orig_shape,
         "truncate_factor": trunc_factor
@@ -114,12 +191,18 @@ def load_complex(filename):
     with open(filename, 'r') as f:
         data = json.load(f)
     
-    complex_array = np.array([[complex(real, imag) for real, imag in row] 
-                             for row in data["data"]])
+    complex_array = np.array([
+        [
+            complex(r if r is not None else np.nan, i if i is not None else np.nan)
+            for r, i in row
+        ]
+        for row in data["data"]
+    ])
     return complex_array, data["scale"], data["original_shape"], data["truncate_factor"]
 
-def process_image(image, output_dir, idx, truncate_factor=0.3):
-    name = f"image_{idx:04d}"
+def process_image(item, output_dir, idx, truncate_factor=0.3):
+    [image, label] = item
+    name = f"image_{idx:04d}_label_{label}"
     
     # Forward transform
     fft_data = np.fft.fftshift(np.fft.fftn(image, norm='forward'))
@@ -131,21 +214,23 @@ def process_image(image, output_dir, idx, truncate_factor=0.3):
     # Verify untruncation
     untruncated = untruncate_fft(truncated, fft_data.shape)
     pre_reconstructured = np.fft.ifftn(np.fft.ifftshift(untruncated), norm='forward')
+    
+    # Experimental Circular Mask
+    truncated = erase_outer_circle(truncated)
 
     non_redundant = remove_redundancies(truncated)
-    
-    # Normalize
-    max_mag = np.abs(non_redundant).max()
-    scale = max_mag if max_mag > 0 else 1.0
-    normalized = non_redundant / scale
-    serializable = normalized
+    serializable, scale = normalize(non_redundant)
     
     # Serialize
     json_path = os.path.join(output_dir, f"{name}.json")
-    serialize_complex(serializable, scale, fft_data.shape, truncate_factor, json_path, precision=1)
+    serialize_complex(serializable, label, scale, fft_data.shape, truncate_factor, json_path, precision=3)
     
     # Load and Reconstruct
     loaded_norm, loaded_scale, loaded_shape, _ = load_complex(json_path)
+
+    # Restore NaNs into defaults:
+    loaded_norm = replace_nan_pixels(loaded_norm, fill_value = 0.0+0.0j)
+
     loaded_norm = loaded_norm * loaded_scale
     restored_hermitian = restore_hermitian(loaded_norm, truncated.shape)
     restored_untruncated = untruncate_fft(restored_hermitian, loaded_shape)
@@ -200,10 +285,10 @@ def process_image(image, output_dir, idx, truncate_factor=0.3):
     axes[0, 3].set_title('Json Reconstructed Image')
     axes[0, 3].axis('off')
 
-    axes[1, 3].imshow(np.real(rfft_data), cmap='RdBu')
+    axes[1, 3].imshow(np.real(restored_untruncated), cmap='RdBu')
     axes[1, 3].set_title('Json RFFT Real')
     
-    axes[2, 3].imshow(np.imag(rfft_data), cmap='RdBu')
+    axes[2, 3].imshow(np.imag(restored_untruncated), cmap='RdBu')
     axes[2, 3].set_title('Json RFFT Imag')
 
 
