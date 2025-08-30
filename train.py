@@ -8,7 +8,8 @@ import math
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from IPython.display import clear_output
+# Remove IPython dependency for command line usage
+# from IPython.display import clear_output
 from qiskit import QuantumCircuit
 from qiskit.circuit import ParameterVector
 from qiskit.circuit import QuantumCircuit, Parameter
@@ -16,7 +17,7 @@ from qiskit.circuit.library import z_feature_map
 from qiskit.quantum_info import SparsePauliOp
 from qiskit.primitives import StatevectorEstimator as Estimator
 from qiskit.quantum_info import SparsePauliOp
-from qiskit_machine_learning.optimizers import COBYLA, SPSA
+from qiskit_machine_learning.optimizers import COBYLA, SPSA, GradientDescent
 from qiskit_aer import AerSimulator
 from qiskit_aer.primitives import EstimatorV2
 from qiskit_machine_learning.utils import algorithm_globals
@@ -28,10 +29,13 @@ from datasets import Dataset, DatasetDict
 from huggingface_hub import hf_hub_download, list_repo_files
 
 algorithm_globals.random_seed = 12345
+
+# Global variables - properly initialized
 objective_func_vals = []
 last_checkpoint = None
 weights_history = []
 error_rates = []
+batch_boundaries = []  # Track where each batch ends for plotting
 
 
 def conv_circuit(params):
@@ -206,9 +210,10 @@ def callback_graph(weights, obj_func_eval,
                    checkpoint_interval=5, 
                    filename_obj="objective_values.json",
                    filename_weights="weights_checkpoint.json",
-                   save_weights=True):
+                   save_weights=True,
+                   plot_filename="training_progress.png"):
     """
-    Original callback with optional JSON checkpointing.
+    Improved callback with proper global variable handling and file-based plotting.
 
     Args:
         weights: current optimizer parameters
@@ -217,8 +222,13 @@ def callback_graph(weights, obj_func_eval,
         filename_obj: file to store objective values (default="objective_values.json")
         filename_weights: file to store weights (default="weights_checkpoint.json")
         save_weights: whether to save weights (default=True)
+        plot_filename: filename to save the plot (default="training_progress.png")
     """
+    # Access global variables properly
+    global objective_func_vals, weights_history, last_checkpoint
+    
     plt.rcParams["figure.figsize"] = (12, 6)
+    
     # Append objective value
     objective_func_vals.append(obj_func_eval)
     
@@ -235,15 +245,44 @@ def callback_graph(weights, obj_func_eval,
 
     last_checkpoint = weights
     
-    # Plot objective function
-    clear_output(wait=True)
-    plt.figure(figsize=(6,4))
-    plt.plot(range(len(objective_func_vals)), objective_func_vals, marker='o')
+    # Create plot and save to file (no clearing for command line)
+    plt.figure(figsize=(12, 6))
+    
+    # Plot objective function values
+    plt.subplot(1, 2, 1)
+    plt.plot(range(len(objective_func_vals)), objective_func_vals, marker='o', label='Objective Value')
+    
+    # Add batch boundaries if they exist
+    for boundary in batch_boundaries:
+        plt.axvline(x=boundary, color='red', linestyle='--', alpha=0.7, label='Batch Boundary')
+    
     plt.xlabel("Iteration")
-    plt.ylabel("Objective function value")
-    plt.title("Objective function value vs Iteration")
+    plt.ylabel("Objective Function Value")
+    plt.title("Objective Function Value vs Iteration")
     plt.grid(True)
-    plt.show()
+    plt.legend()
+    
+    # Plot error rates if available
+    plt.subplot(1, 2, 2)
+    if error_rates:
+        batch_numbers = range(1, len(error_rates) + 1)
+        plt.plot(batch_numbers, [rate * 100 for rate in error_rates], 
+                marker='s', color='red', label='Error Rate')
+        plt.xlabel("Batch Number")
+        plt.ylabel("Error Rate (%)")
+        plt.title("Error Rate vs Batch")
+        plt.grid(True)
+        plt.legend()
+    else:
+        plt.text(0.5, 0.5, 'No error rates yet', ha='center', va='center', transform=plt.gca().transAxes)
+        plt.title("Error Rate vs Batch")
+    
+    plt.tight_layout()
+    plt.savefig(plot_filename, dpi=150, bbox_inches='tight')
+    plt.close()  # Close to free memory
+    
+    # Print progress to console
+    print(f"Iteration {len(objective_func_vals)}: Objective = {obj_func_eval:.6f}")
 
 def process_item(item):
     data = item["data"]
@@ -339,7 +378,7 @@ def estimate_runtime(circuit, observables, n_samples=1, device='cpu'):
     # Base time per Pauli term per sample (rough)
     # These are empirical approximations for statevector simulation
     base_ms = 10  # ms per term for shallow circuit on CPU
-    # scale linearly with depth relative to a “unit” depth 4
+    # scale linearly with depth relative to a "unit" depth 4
     base_ms *= depth / 4  
 
     # Scale for GPU
@@ -421,10 +460,13 @@ def get_qnn(topology, circuit_size, class_count, max_threads=20,):
     )
 
 def train(ds, batches=1, batch_size=20, test_batch_size=10, class_count=10):
-    #ds = load_dataset_via_pandas("ljcamargo/quantum_mnist")
-    train_dataset = ds["train"][0:1000]
-    test_dataset = ds["train"][1000:1100]
-    sample_row = train_dataset[0]
+    global batch_boundaries, error_rates, objective_func_vals
+    
+    train_dataset = ds["train"].select(range(0,1000))
+    test_dataset = ds["train"].select(range(1000,1100))
+    sample_row = ds["train"][0]["data"]
+    
+    print("Sample row topology data:", sample_row)
     [topology, circuit_size] = get_topology(sample_row)
     qnn = get_qnn(topology, circuit_size, class_count)
     
@@ -435,16 +477,29 @@ def train(ds, batches=1, batch_size=20, test_batch_size=10, class_count=10):
         print(f"=== Batch {batch+1}/{batches} ===")
         train = train_dataset.select(range(batch, batch+batch_size)).map(process_item)
         test = test_dataset.select(range(batch, batch+test_batch_size)).map(process_item)
+        
+        # Mark batch boundary for plotting
+        if batch > 0:  # Don't mark boundary before first batch
+            batch_boundaries.append(len(objective_func_vals))
+        
         classifier = train_pseudoepoch(train, qnn, max_iters=batch_size, initial_point=last_checkpoint)
         err_rate = test_pseudoepoch(test, classifier)
         error_rates.append(err_rate)
         print(f"Error rate for batch {batch+1}: {err_rate*100:.2f}%")
+        
+        # Update the final plot with current error rates
+        callback_graph(last_checkpoint if last_checkpoint is not None else np.zeros(1), 
+                      objective_func_vals[-1] if objective_func_vals else 0,
+                      save_weights=False)
+    
     print(f"Average error rate over {batches} batches: {np.mean(error_rates)*100:.2f}%")
     
 def train_pseudoepoch(items, qnn, max_iters=20, initial_point=None):
+    global last_checkpoint
+    
     classifier = NeuralNetworkClassifier(
         qnn,
-        optimizer=COBYLA(maxiter=max_iters),  # Set max iterations here
+        optimizer=SPSA(maxiter=100),  # Set max iterations here
         callback=callback_graph,
         initial_point=initial_point,
     )
@@ -454,9 +509,10 @@ def train_pseudoepoch(items, qnn, max_iters=20, initial_point=None):
     x = np.asarray(features)
     y = np.asarray(labels)
 
-    #objective_func_vals = []
-    #weights_history = []
     classifier.fit(x, y)
+
+    # Update global checkpoint with the trained weights
+    last_checkpoint = classifier.weights
 
     # score classifier
     print(f"Accuracy from the train data : {np.round(100 * classifier.score(x, y), 2)}%")
@@ -476,7 +532,7 @@ def test_pseudoepoch(test_ds, classifier):
 
 def main():
     ds = load_dataset_via_pandas("ljcamargo/quantum_mnist")
-    train(ds, batches=1, batch_size=20, test_batch_size=10, class_count=10)
+    train(ds, batches=20, batch_size=20, test_batch_size=10, class_count=10)
 
 if __name__ == "__main__":
     main()
