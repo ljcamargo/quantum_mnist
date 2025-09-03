@@ -17,3 +17,5 @@ __pycache__
 *.rar
 *.db
 *.xml
+*.json
+*.png

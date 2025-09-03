@@ -17,7 +17,7 @@ from qiskit.circuit.library import z_feature_map
 from qiskit.quantum_info import SparsePauliOp
 from qiskit.primitives import StatevectorEstimator as Estimator
 from qiskit.quantum_info import SparsePauliOp
-from qiskit_machine_learning.optimizers import COBYLA, SPSA, GradientDescent
+from qiskit_machine_learning.optimizers import COBYLA, SPSA
 from qiskit_aer import AerSimulator
 from qiskit_aer.primitives import EstimatorV2
 from qiskit_machine_learning.utils import algorithm_globals
@@ -36,6 +36,8 @@ last_checkpoint = None
 weights_history = []
 error_rates = []
 batch_boundaries = []  # Track where each batch ends for plotting
+best_checkpoint = None
+best_objective = float('inf')  # Track best objective value
 
 
 def conv_circuit(params):
@@ -210,27 +212,33 @@ def callback_graph(weights, obj_func_eval,
                    checkpoint_interval=5, 
                    filename_obj="objective_values.json",
                    filename_weights="weights_checkpoint.json",
+                   filename_best="best_weights.json",
                    save_weights=True,
                    plot_filename="training_progress.png"):
-    """
-    Improved callback with proper global variable handling and file-based plotting.
-
-    Args:
-        weights: current optimizer parameters
-        obj_func_eval: current objective function value
-        checkpoint_interval: save weights every N iterations (default=5)
-        filename_obj: file to store objective values (default="objective_values.json")
-        filename_weights: file to store weights (default="weights_checkpoint.json")
-        save_weights: whether to save weights (default=True)
-        plot_filename: filename to save the plot (default="training_progress.png")
-    """
+    
     # Access global variables properly
-    global objective_func_vals, weights_history, last_checkpoint
+    global objective_func_vals, weights_history, last_checkpoint, best_checkpoint, best_objective
+
+    print("Callback graph")
     
     plt.rcParams["figure.figsize"] = (12, 6)
     
     # Append objective value
     objective_func_vals.append(obj_func_eval)
+    
+    # Check if this is the best model so far (lower objective is better for COBYLA)
+    if obj_func_eval < best_objective:
+        best_objective = obj_func_eval
+        best_checkpoint = weights.copy() if hasattr(weights, 'copy') else np.array(weights)
+        # Save best weights immediately
+        with open(filename_best, "w") as f:
+            best_weights_data = {
+                "best_objective": float(best_objective),
+                "best_weights": best_checkpoint.tolist() if hasattr(best_checkpoint, "tolist") else list(best_checkpoint),
+                "iteration": len(objective_func_vals)
+            }
+            json.dump(best_weights_data, f, indent=2)
+        print(f"*** New best model found! Objective = {obj_func_eval:.6f} ***")
     
     # Save objective values every iteration
     with open(filename_obj, "w") as f:
@@ -252,9 +260,16 @@ def callback_graph(weights, obj_func_eval,
     plt.subplot(1, 2, 1)
     plt.plot(range(len(objective_func_vals)), objective_func_vals, marker='o', label='Objective Value')
     
+    # Mark the best objective
+    if best_objective < float('inf'):
+        best_iter = [i for i, val in enumerate(objective_func_vals) if val == best_objective][0]
+        plt.plot(best_iter, best_objective, marker='*', markersize=15, color='gold', 
+                label=f'Best: {best_objective:.3f}')
+    
     # Add batch boundaries if they exist
-    for boundary in batch_boundaries:
-        plt.axvline(x=boundary, color='red', linestyle='--', alpha=0.7, label='Batch Boundary')
+    for i, boundary in enumerate(batch_boundaries):
+        plt.axvline(x=boundary, color='red', linestyle='--', alpha=0.7, 
+                   label='Batch Boundary' if i == 0 else "")
     
     plt.xlabel("Iteration")
     plt.ylabel("Objective Function Value")
@@ -283,6 +298,10 @@ def callback_graph(weights, obj_func_eval,
     
     # Print progress to console
     print(f"Iteration {len(objective_func_vals)}: Objective = {obj_func_eval:.6f}")
+
+def callback_step(evaluations, parameters, loss, stepsize, accepted):
+    print(f"Step {evaluations}: Loss = {loss:.6f}, Stepsize = {stepsize:.6f}, Accepted = {accepted}")
+
 
 def process_item(item):
     data = item["data"]
@@ -461,9 +480,10 @@ def get_qnn(topology, circuit_size, class_count, max_threads=20,):
 
 def train(ds, batches=1, batch_size=20, test_batch_size=10, class_count=10):
     global batch_boundaries, error_rates, objective_func_vals
-    
-    train_dataset = ds["train"].select(range(0,1000))
-    test_dataset = ds["train"].select(range(1000,1100))
+
+    #ds = ds.train_test_split(test_size=0.1, seed=42)
+    train_dataset = ds["train"]
+    test_dataset = ds["test"]
     sample_row = ds["train"][0]["data"]
     
     print("Sample row topology data:", sample_row)
@@ -475,14 +495,23 @@ def train(ds, batches=1, batch_size=20, test_batch_size=10, class_count=10):
     
     for batch in range(batches):
         print(f"=== Batch {batch+1}/{batches} ===")
-        train = train_dataset.select(range(batch, batch+batch_size)).map(process_item)
-        test = test_dataset.select(range(batch, batch+test_batch_size)).map(process_item)
+        # Fixed: proper batch indexing - select from original dataset directly
+        train_start = batch * batch_size
+        train_end = min((batch + 1) * batch_size, len(train_dataset))
+        test_start = batch * test_batch_size
+        test_end = min((batch + 1) * test_batch_size, len(test_dataset))
+        
+        print(f"Training on samples {train_start}-{train_end-1}, Testing on samples {test_start}-{test_end-1}")
+        
+        # Select directly from the full datasets, not from already selected subsets
+        train = train_dataset.select(range(train_start, train_end)).map(process_item)
+        test = test_dataset.select(range(test_start, test_end)).map(process_item)
         
         # Mark batch boundary for plotting
         if batch > 0:  # Don't mark boundary before first batch
             batch_boundaries.append(len(objective_func_vals))
         
-        classifier = train_pseudoepoch(train, qnn, max_iters=batch_size, initial_point=last_checkpoint)
+        classifier = train_pseudoepoch(train, qnn, maxiter=3, initial_point=last_checkpoint)
         err_rate = test_pseudoepoch(test, classifier)
         error_rates.append(err_rate)
         print(f"Error rate for batch {batch+1}: {err_rate*100:.2f}%")
@@ -493,13 +522,28 @@ def train(ds, batches=1, batch_size=20, test_batch_size=10, class_count=10):
                       save_weights=False)
     
     print(f"Average error rate over {batches} batches: {np.mean(error_rates)*100:.2f}%")
+    print(f"Best objective value achieved: {best_objective:.6f}")
+    print("Best model weights saved to 'best_weights.json'")
     
-def train_pseudoepoch(items, qnn, max_iters=20, initial_point=None):
+def train_pseudoepoch(items, qnn, maxiter=20, initial_point=None):
     global last_checkpoint
+
+    def make_schedule(init=0.2, decay=0.99):
+        def generator():
+            i = 0
+            while True:
+                yield init * (decay**i)
+                i += 1
+        return generator  # return the *function*, not the iterator
     
     classifier = NeuralNetworkClassifier(
         qnn,
-        optimizer=SPSA(maxiter=100),  # Set max iterations here
+        optimizer=SPSA(
+            maxiter=maxiter, 
+            learning_rate = make_schedule(init=0.2, decay=0.99), 
+            perturbation = make_schedule(init=0.1, decay=0.99),
+            callback=callback_step,
+        ),
         callback=callback_graph,
         initial_point=initial_point,
     )
@@ -532,7 +576,8 @@ def test_pseudoepoch(test_ds, classifier):
 
 def main():
     ds = load_dataset_via_pandas("ljcamargo/quantum_mnist")
-    train(ds, batches=20, batch_size=20, test_batch_size=10, class_count=10)
+    # Increase batches to run multiple pseudoepochs
+    train(ds, batches=1, batch_size=200, test_batch_size=1, class_count=10)
 
 if __name__ == "__main__":
     main()
