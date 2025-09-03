@@ -8,12 +8,9 @@ import math
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-# Remove IPython dependency for command line usage
-# from IPython.display import clear_output
 from qiskit import QuantumCircuit
 from qiskit.circuit import ParameterVector
 from qiskit.circuit import QuantumCircuit, Parameter
-from qiskit.circuit.library import z_feature_map
 from qiskit.quantum_info import SparsePauliOp
 from qiskit.primitives import StatevectorEstimator as Estimator
 from qiskit.quantum_info import SparsePauliOp
