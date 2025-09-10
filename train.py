@@ -15,7 +15,6 @@ from qiskit.quantum_info import SparsePauliOp
 from qiskit.primitives import StatevectorEstimator as Estimator
 from qiskit.quantum_info import SparsePauliOp
 from qiskit_machine_learning.optimizers import COBYLA, SPSA
-from qiskit_aer import AerSimulator
 from qiskit_aer.primitives import EstimatorV2
 from qiskit_machine_learning.utils import algorithm_globals
 from qiskit_machine_learning.algorithms.classifiers import NeuralNetworkClassifier

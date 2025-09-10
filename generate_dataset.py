@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Simplified FFT Image Processing using numpy real FFT functions
-Usage: python fft_transforms.py <input_path> <output_dir> [--truncate-factor 0.3] [--split train]
+Usage: python generate_dataset.py <input_path> <output_dir> [--truncate-factor 0.3] [--split train]
 """
 
 import os
