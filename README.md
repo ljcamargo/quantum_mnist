@@ -43,7 +43,7 @@ quantum_mnist/
 
 ## 📓 Notebook
 
-To understand better the rationale behind this training/inference workflow, please follow the Jupyter Notebook [quantum_mnist_training.ipnyb](./quantum_mnist_training.ipnyb)
+To understand better the rationale behind this training/inference workflow, please follow the Jupyter Notebook [quantum_mnist_training.ipnyb](https://github.com/ljcamargo/quantum_mnist/blob/master/quantum_mnist_training.ipynb)
 
 ## ⚙️ Scripts
 
